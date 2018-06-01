@@ -18,7 +18,8 @@ import "github.com/namecoin/ncdns/certdehydrate"
 var (
 	flagGroup        = cflag.NewGroup(nil, "noncompliance-experiments")
 	onionExperimentFlag   = cflag.Bool(flagGroup, "onion", false, "Generate CNAME records for Tor onion services.  Not standards-compliant, you shouldn't use this -- it's only for analytic purposes!")
-	zeroNetExperimentFlag = cflag.Bool(flagGroup, "zeronet", false, "Generate CNAME records for ZeroNet services.  Not standards-compliant, you shouldn't use this -- it's only for analytic purposes!")
+	zeroNetExperimentFlag = cflag.Bool(flagGroup, "zeronet", false, "Generate A records for ZeroNet services.  Not standards-compliant, you shouldn't use this -- it's only for analytic purposes!")
+	zeroNetExperimentIP4Flag = cflag.String(flagGroup, "zeronet-ip4", "", "IPv4 address for ZeroNet.  Not standards-compliant, you shouldn't use this -- it's only for analytic purposes!")
 	nsExperimentFlag      = cflag.Bool(flagGroup, "ns", false, "Generate extra trailing periods for NS records.  Not standards-compliant, you shouldn't use this -- it's only for analytic purposes!")
 	onlyExperimentFlag    = cflag.Bool(flagGroup, "only", false, "Exclude DNS records that weren't generated with a noncompliance experiment.  Not standards-compliant, you shouldn't use this -- it's only for analytic purposes!")
 )
@@ -1292,8 +1293,9 @@ func parseZeroNet(rv map[string]interface{}, v *Value, resolve ResolveFunc, errF
 	for mk, mv := range m {
 		if _, ok := mv.(string); ok {
 			if mk == "" {
-				v.Alias = "zeronet."
-				v.HasAlias = true
+				v.IP = nil
+				v.IP6 = nil
+				addIP(rv, v, errFunc, zeroNetExperimentIP4Flag.Value(), false)
 			} else {
 				if v.Map == nil {
 					v.Map = make(map[string]*Value)
@@ -1304,8 +1306,9 @@ func parseZeroNet(rv map[string]interface{}, v *Value, resolve ResolveFunc, errF
 					v2 = v2e
 				}
 
-				v2.Alias = "zeronet."
-				v2.HasAlias = true
+				v2.IP = nil
+				v2.IP6 = nil
+				addIP(rv, v2, errFunc, zeroNetExperimentIP4Flag.Value(), false)
 
 				v.Map[mk] = v2
 			}
