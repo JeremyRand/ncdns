@@ -13,6 +13,7 @@ import (
 	"github.com/namecoin/ncdns/ncdomain"
 	"github.com/namecoin/ncdns/tlsoverridefirefox"
 	"github.com/namecoin/ncdns/util"
+	"github.com/namecoin/ncdns/rrtourl"
 )
 
 var log, Log = xlog.New("ncdumpzone")
@@ -25,6 +26,12 @@ func dumpRR(rr dns.RR, dest io.Writer, format string) error {
 		fmt.Fprint(dest, rr.String(), "\n")
 	case "firefox-override":
 		result, err := tlsoverridefirefox.OverrideFromRR(rr)
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(dest, result)
+	case "url-list":
+		result, err := rrtourl.URLsFromRR(rr)
 		if err != nil {
 			return err
 		}
@@ -77,7 +84,8 @@ func dumpName(item *extratypes.NameFilterItem, conn namecoin.Conn,
 // Dump extracts all domain names from conn, formats them according to the
 // specified format, and writes the result to dest.
 func Dump(conn namecoin.Conn, dest io.Writer, format string) error {
-	if format != "zonefile" && format != "firefox-override" {
+	if format != "zonefile" && format != "firefox-override" &&
+		format != "url-list" {
 		return fmt.Errorf("Invalid \"format\" argument: %s", format)
 	}
 
