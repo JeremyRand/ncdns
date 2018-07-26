@@ -10,8 +10,19 @@ import "github.com/namecoin/ncdns/util"
 import "strings"
 import "strconv"
 
+import "gopkg.in/hlandau/easyconfig.v1/cflag"
+
 import "github.com/namecoin/ncdns/x509"
 import "github.com/namecoin/ncdns/certdehydrate"
+
+var (
+	flagGroup        = cflag.NewGroup(nil, "noncompliance-experiments")
+	onionExperimentFlag   = cflag.Bool(flagGroup, "onion", false, "Generate CNAME records for Tor onion services.  Not standards-compliant, you shouldn't use this -- it's only for analytic purposes!")
+	zeroNetExperimentFlag = cflag.Bool(flagGroup, "zeronet", false, "Generate A records for ZeroNet services.  Not standards-compliant, you shouldn't use this -- it's only for analytic purposes!")
+	zeroNetExperimentIP4Flag = cflag.String(flagGroup, "zeronet-ip4", "", "IPv4 address for ZeroNet.  Not standards-compliant, you shouldn't use this -- it's only for analytic purposes!")
+	nsExperimentFlag      = cflag.Bool(flagGroup, "ns", false, "Generate extra trailing periods for NS records.  Not standards-compliant, you shouldn't use this -- it's only for analytic purposes!")
+	onlyExperimentFlag    = cflag.Bool(flagGroup, "only", false, "Exclude DNS records that weren't generated with a noncompliance experiment.  Not standards-compliant, you shouldn't use this -- it's only for analytic purposes!")
+)
 
 const depthLimit = 16
 const mergeDepthLimit = 4
@@ -443,15 +454,21 @@ func parse(rv interface{}, v *Value, resolve ResolveFunc, errFunc ErrorFunc, dep
 	}
 
 	parseImport(rvm, v, resolve, errFunc, depth, mergeDepth, relname, mergedNames)
-	if ip, ok := rvm["ip"]; ok {
-		parseIP(rvm, v, errFunc, ip, false)
+	if !onlyExperimentFlag.Value() {
+		if ip, ok := rvm["ip"]; ok {
+			parseIP(rvm, v, errFunc, ip, false)
+		}
+		if ip6, ok := rvm["ip6"]; ok {
+			parseIP(rvm, v, errFunc, ip6, true)
+		}
 	}
-	if ip6, ok := rvm["ip6"]; ok {
-		parseIP(rvm, v, errFunc, ip6, true)
+	if !onlyExperimentFlag.Value() || nsExperimentFlag.Value() {
+		parseNS(rvm, v, errFunc, relname)
 	}
-	parseNS(rvm, v, errFunc, relname)
-	parseAlias(rvm, v, errFunc, relname)
-	parseTranslate(rvm, v, errFunc, relname)
+	if !onlyExperimentFlag.Value() {
+		parseAlias(rvm, v, errFunc, relname)
+		parseTranslate(rvm, v, errFunc, relname)
+	}
 	parseHostmaster(rvm, v, errFunc)
 	parseDS(rvm, v, errFunc)
 	parseTXT(rvm, v, errFunc)
@@ -459,6 +476,18 @@ func parse(rv interface{}, v *Value, resolve ResolveFunc, errFunc ErrorFunc, dep
 	parseMX(rvm, v, errFunc, relname)
 	parseTLSA(rvm, v, errFunc)
 	parseMap(rvm, v, resolve, errFunc, depth, mergeDepth, relname)
+
+	// These 3 modes are not standards-compliant; they are only present for analytic purposes
+	if zeroNetExperimentFlag.Value() {
+		parseZeroNet(rvm, v, resolve, errFunc, depth, mergeDepth, relname)
+	}
+	if onionExperimentFlag.Value() {
+		parseTor(rvm, v, errFunc, relname)
+	}
+	if nsExperimentFlag.Value() {
+		forceNSTrailingPeriod(rvm, v, errFunc, relname)
+	}
+
 	v.moveEmptyMapItems()
 
 	if subdomain != "" {
@@ -610,6 +639,16 @@ func addNS(rv map[string]interface{}, v *Value, errFunc ErrorFunc, s, relname st
 	}
 }
 
+func forceNSTrailingPeriod(rv map[string]interface{}, v *Value, errFunc ErrorFunc, relname string) {
+	for i,_ := range v.NS {
+		if !strings.HasSuffix(v.NS[i], ".") {
+			v.NS[i] = v.NS[i] + "."
+		} else if onlyExperimentFlag.Value() {
+			v.NS[i] = "_removed_ns_record.bit."
+		}
+	}
+}
+
 func parseAlias(rv map[string]interface{}, v *Value, errFunc ErrorFunc, relname string) {
 	alias, ok := rv["alias"]
 	if !ok {
@@ -629,6 +668,50 @@ func parseAlias(rv map[string]interface{}, v *Value, errFunc ErrorFunc, relname 
 		}
 
 		v.Alias = s
+		v.HasAlias = true
+		return
+	}
+
+	errFunc.add(fmt.Errorf("unknown alias field format"))
+}
+
+func parseTor(rv map[string]interface{}, v *Value, errFunc ErrorFunc, relname string) {
+	txtAlias := ""
+
+	subdomain, ok := v.Map["_tor"]
+	if ok {
+		txt := subdomain.TXT
+		if len(txt) >= 1 {
+			aliasSegments := txt[0]
+			if len(aliasSegments) >= 1 {
+				txtAlias = strings.Join(aliasSegments, "")
+				if strings.HasSuffix(txtAlias, ".onion") {
+					v.Alias = txtAlias + "."
+					v.HasAlias = true
+					return
+				}
+			}
+		}
+	}
+
+	alias, ok := rv["tor"]
+	if !ok {
+		return
+	}
+
+	if alias == nil {
+		v.Alias = ""
+		v.HasAlias = false
+		return
+	}
+
+	if s, ok := alias.(string); ok {
+		if !util.ValidateRelOwnerName(s) {
+			errFunc.add(fmt.Errorf("malformed alias name"))
+			return
+		}
+
+		v.Alias = s + "."
 		v.HasAlias = true
 		return
 	}
@@ -1190,6 +1273,48 @@ func parseMap(rv map[string]interface{}, v *Value, resolve ResolveFunc, errFunc 
 
 		} else {
 			errFunc.add(fmt.Errorf("Value in map object must be an object or string"))
+			continue
+		}
+	}
+}
+
+func parseZeroNet(rv map[string]interface{}, v *Value, resolve ResolveFunc, errFunc ErrorFunc, depth, mergeDepth int, relname string) {
+	rmap, ok := rv["zeronet"]
+	if !ok || rmap == nil {
+		return
+	}
+
+	m, ok := rmap.(map[string]interface{})
+	if !ok {
+		errFunc.add(fmt.Errorf("ZeroNet value must be an object"))
+		return
+	}
+
+	for mk, mv := range m {
+		if _, ok := mv.(string); ok {
+			if mk == "" {
+				v.IP = nil
+				v.IP6 = nil
+				addIP(rv, v, errFunc, zeroNetExperimentIP4Flag.Value(), false)
+			} else {
+				if v.Map == nil {
+					v.Map = make(map[string]*Value)
+				}
+
+				v2 := &Value{}
+				if v2e, ok := v.Map[mk]; ok {
+					v2 = v2e
+				}
+
+				v2.IP = nil
+				v2.IP6 = nil
+				addIP(rv, v2, errFunc, zeroNetExperimentIP4Flag.Value(), false)
+
+				v.Map[mk] = v2
+			}
+			
+		} else {
+			errFunc.add(fmt.Errorf("Value in zeronet object must be a string"))
 			continue
 		}
 	}
